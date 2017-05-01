@@ -1,7 +1,7 @@
 #!/bin/bash
 
 MULTIDEV="update-wp"
-SITENAME="scalewp.io"
+SITENAME="davidneedham.me"
 
 UPDATES_APPLIED=false
 
