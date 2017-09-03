@@ -2,8 +2,10 @@
 
 MULTIDEV="update-wp"
 SITENAME="davidneedham.me"
-
 UPDATES_APPLIED=false
+
+# Stash Circle Artifacts URL
+CIRCLE_ARTIFACTS_URL="$CIRCLE_BUILD_URL/artifacts/$CIRCLE_NODE_INDEX/$CIRCLE_ARTIFACTS"
 
 # login to Terminus
 echo -e "\nLogging into Terminus..."
@@ -36,16 +38,20 @@ else
     terminus upstream:updates:apply $SITE_UUID.$MULTIDEV --yes --updatedb --accept-upstream
     UPDATES_APPLIED=true
 
-    terminus wp $SITE_UUID.$MULTIDEV -- core update-db
+    terminus -n wp $SITE_UUID.$MULTIDEV -- core update-db
 fi
 
 # making sure the multidev is in SFTP mode
 echo -e "\nSetting the ${MULTIDEV} multidev to SFTP mode"
 terminus connection:set $SITE_UUID.$MULTIDEV sftp
 
+# Wake pantheon SSH
+terminus -n wp $SITE_UUID.$MULTIDEV -- cli version
+
 # check for WordPress plugin updates
 echo -e "\nChecking for WordPress plugin updates on the ${MULTIDEV} multidev..."
-PLUGIN_UPDATES="$(terminus wp $SITE_UUID.$MULTIDEV -- plugin list --update=available --format=count)"
+PLUGIN_UPDATES=$(terminus -n wp $SITE_UUID.$MULTIDEV -- plugin list --update=available --format=count)
+echo $PLUGIN_UPDATES
 
 if [[ "$PLUGIN_UPDATES" == "0" ]]
 then
@@ -54,7 +60,7 @@ then
 else
     # update WordPress plugins
     echo -e "\nUpdating WordPress plugins on the ${MULTIDEV} multidev..."
-    terminus wp $SITE_UUID.$MULTIDEV -- plugin update --all
+    terminus -n wp $SITE_UUID.$MULTIDEV -- plugin update --all
 
     # wake the site environment before committing code
     echo -e "\nWaking the ${MULTIDEV} multidev..."
@@ -68,7 +74,8 @@ fi
 
 # check for WordPress theme updates
 echo -e "\nChecking for WordPress theme updates on the ${MULTIDEV} multidev..."
-THEME_UPDATES=$(terminus wp $SITE_UUID.$MULTIDEV -- theme list --update=available --format=count)
+THEME_UPDATES=$(terminus -n wp $SITE_UUID.$MULTIDEV -- theme list --update=available --format=count)
+echo $THEME_UPDATES
 
 if [[ "$THEME_UPDATES" == "0" ]]
 then
@@ -77,7 +84,7 @@ then
 else
     # update WordPress themes
     echo -e "\nUpdating WordPress themes on the ${MULTIDEV} multidev..."
-    terminus wp $SITE_UUID.$MULTIDEV -- theme update --all
+    terminus -n wp $SITE_UUID.$MULTIDEV -- theme update --all
 
     # wake the site environment before committing code
     echo -e "\nWaking the ${MULTIDEV} multidev..."
@@ -99,10 +106,6 @@ then
 else
     # updates applied, carry on
 
-    # install node dependencies
-    echo -e "\nRunning npm install..."
-    npm install
-
     # ping the multidev environment to wake it from sleep
     echo -e "\nPinging the ${MULTIDEV} multidev environment to wake it from sleep..."
     curl -I "https://$MULTIDEV-wp-microsite.pantheonsite.io/"
@@ -110,24 +113,35 @@ else
     # backstop visual regression
     echo -e "\nRunning BackstopJS tests..."
 
-    cd node_modules/backstopjs
+    # Backstop visual regression
+    echo -e "\nRunning backstop reference..."
 
-    npm run reference
-    # npm run test
+    backstop reference
 
-    VISUAL_REGRESSION_RESULTS=$(npm run test)
+    echo -e "\nRunning backstop test..."
+    VISUAL_REGRESSION_RESULTS=$(backstop test || echo 'true')
 
     echo "${VISUAL_REGRESSION_RESULTS}"
+
+    # Rsync files to CIRCLE_ARTIFACTS
+    echo -e "\nRsyincing backstop_data files to $CIRCLE_ARTIFACTS..."
+    rsync -rlvz backstop_data $CIRCLE_ARTIFACTS
+
+    DIFF_REPORT="$CIRCLE_ARTIFACTS/backstop_data/html_report/index.html"
+    if [ ! -f $DIFF_REPORT ]; then
+        echo -e "\nDiff report file $DIFF_REPORT not found!"
+        exit 1
+    fi
+    DIFF_REPORT_URL="$CIRCLE_ARTIFACTS_URL/backstop_data/html_report/index.html"
 
     cd -
     if [[ ${VISUAL_REGRESSION_RESULTS} == *"Mismatch errors found"* ]]
     then
         # visual regression failed
         echo -e "\nVisual regression tests failed! Please manually check the ${MULTIDEV} multidev..."
-        SLACK_MESSAGE="${SITENAME} Circle CI update check #${CIRCLE_BUILD_NUM} by ${CIRCLE_PROJECT_USERNAME}. Visual regression tests failed on <https://dashboard.pantheon.io/sites/${SITE_UUID}#${MULTIDEV}/code|the ${MULTIDEV} environment>! Please test manually."
+        SLACK_MESSAGE="${SITENAME} Circle CI update check #${CIRCLE_BUILD_NUM} by ${CIRCLE_PROJECT_USERNAME}. Visual regression tests failed on <https://dashboard.pantheon.io/sites/${SITE_UUID}#${MULTIDEV}/code|the ${MULTIDEV} environment>! Please test manually. Visual Regression Report: $DIFF_REPORT_URL"
         echo -e "\nSending a message to the ${SLACK_CHANNEL} Slack channel"
         curl -X POST --data "payload={\"channel\": \"${SLACK_CHANNEL}\", \"username\": \"${SLACK_USERNAME}\", \"text\": \"${SLACK_MESSAGE}\"}" $SLACK_HOOK_URL
-        exit 1
     else
         # visual regression passed
         echo -e "\nVisual regression tests passed between the ${MULTIDEV} multidev and live."
@@ -140,17 +154,17 @@ else
         echo -e "\nMerging the ${MULTIDEV} multidev back into the dev environment (master)..."
         terminus multidev:merge-to-dev $SITE_UUID.$MULTIDEV
 
-	# update WordPress database on dev
+	    # update WordPress database on dev
         echo -e "\nUpdating the WordPress database on the dev environment..."
-	terminus wp $SITE_UUID.dev -- core update-db
+	    terminus -n wp $SITE_UUID.dev -- core update-db
 
         # deploy to test
         echo -e "\nDeploying the updates from dev to test..."
         terminus env:deploy $SITE_UUID.test --sync-content --cc --note="Auto deploy of WordPress updates (core, plugin, themes)"
 
-	# update WordPress database on test
+	    # update WordPress database on test
         echo -e "\nUpdating the WordPress database on the test environment..."
-	terminus wp $SITE_UUID.test -- core update-db
+	    terminus -n wp $SITE_UUID.test -- core update-db
 
         # backup the live site
         echo -e "\nBacking up the live environment..."
@@ -160,12 +174,12 @@ else
         echo -e "\nDeploying the updates from test to live..."
         terminus env:deploy $SITE_UUID.live --cc --note="Auto deploy of WordPress updates (core, plugin, themes)"
 
-	# update WordPress database on live
+	    # update WordPress database on live
         echo -e "\nUpdating the WordPress database on the live environment..."
-	terminus wp $SITE_UUID.live -- core update-db
+	    terminus -n wp $SITE_UUID.live -- core update-db
 
         echo -e "\nVisual regression tests passed! WordPress updates deployed to live..."
-        SLACK_MESSAGE="${SITENAME} Circle CI update check #${CIRCLE_BUILD_NUM} by ${CIRCLE_PROJECT_USERNAME} Visual regression tests passed! WordPress updates deployed to <https://dashboard.pantheon.io/sites/${SITE_UUID}#live/deploys|the live environment>."
+        SLACK_MESSAGE="${SITENAME} Circle CI update check #${CIRCLE_BUILD_NUM} by ${CIRCLE_PROJECT_USERNAME} Visual regression tests passed! WordPress updates deployed to <https://dashboard.pantheon.io/sites/${SITE_UUID}#live/deploys|the live environment>.  Visual Regression Report: $DIFF_REPORT_URL"
         echo -e "\nSending a message to the ${SLACK_CHANNEL} Slack channel"
         curl -X POST --data "payload={\"channel\": \"${SLACK_CHANNEL}\", \"username\": \"${SLACK_USERNAME}\", \"text\": \"${SLACK_MESSAGE}\"}" $SLACK_HOOK_URL
     fi
